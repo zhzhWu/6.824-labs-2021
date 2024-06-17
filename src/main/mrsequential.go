@@ -27,7 +27,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: mrsequential xxx.so inputfiles...\n")
 		os.Exit(1)
 	}
-
+	//加载map、reduce函数
 	mapf, reducef := loadPlugin(os.Args[1])
 
 	//

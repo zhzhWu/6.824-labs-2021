@@ -20,9 +20,13 @@ import "strconv"
 //
 func Map(filename string, contents string) []mr.KeyValue {
 	// function to detect word separators.
+	//判断r是不是一个英文字母，是则返回false，不是则返回true
 	ff := func(r rune) bool { return !unicode.IsLetter(r) }
 
 	// split contents into an array of words.
+	//根据ff函数，把contents分解成一个个单词
+	//如输入contents为"  foo1;bar2,baz3...",
+	//则输出words为["foo" "bar" "baz"]
 	words := strings.FieldsFunc(contents, ff)
 
 	kva := []mr.KeyValue{}

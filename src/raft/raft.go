@@ -94,10 +94,13 @@ type Raft struct {
 
 	//所有server的易失状态
 	commitIndex int //当前服务器已知的已被提交的最后一个日志条目的Index
+	lastApplied int //每个Raft已经应用到上层状态机的日志的最高索引，初始化为零，单调递增
 
 	//Leader的易失状态，每次当选时重新初始化
 	nextIndex  []int //leader记录待发送给每个server的下一日志条目的index,每次当选都重新初始化为leader最后一条日志的index + 1
 	matchIndex []int //leader记录和每个server已匹配的最后一条日志的index，每次当选都初始化为0
+
+	applyCh chan ApplyMsg //通过此channel模拟把已提交的日志提交到状态机
 }
 
 // return currentTerm and whether this server
@@ -280,8 +283,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
-	return index, term, isLeader
+	if rf.killed() {
+		return 0, -1, false
+	}
+	term, isLeader = rf.GetState()
+	rf.mu.Lock()
+	index = rf.log[len(rf.log)-1].Index + 1 //当日志被提交时，会被追加到当前索引
+	if isLeader == false {
+		rf.mu.Unlock()
+		return index, term, false
+	}
+	//如果是Leader，则向其他server复制日志
+	newLogEntry := LogEntry{
+		Command: command,
+		Term:    term,
+		Index:   index,
+	}
+	rf.log = append(rf.log, newLogEntry) //leader首先把新日志追加到自己的log中去
+	rf.mu.Unlock()
+	go rf.LeaderAppendEntries() //然后把其追加到其他服务器上
+	return index, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -316,7 +337,7 @@ func (rf *Raft) Convert2Leader() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.currentState = Leader
-	rf.votedFor = -1
+	//rf.votedFor = -1
 	rf.leaderId = rf.me
 
 	//每次当选初始化nextIndex,matchIndex
@@ -380,8 +401,8 @@ func (rf *Raft) RunForElection() {
 				rf.votedFor = -1
 				rf.currentState = Follower
 				rf.currentTerm = reply.Term
-				rf.mu.Unlock()
 				rf.resetTimeout() //由Candidate变回Follower，重置选举超时时间
+				rf.mu.Unlock()
 				return
 			}
 			rf.mu.Unlock()
@@ -489,12 +510,37 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//如果该AppendEntries RPC中的最后一条日志条目的任期或索引和当前服务器对应位置日志条目的任期或索引不同
 		//则也表明该AppendEntries RPC中一定包含当前服务器中没有的日志条目
 		//如果不是心跳包，且满足上述条件
-		if len(args.Entries) > 0 && (len(rf.log) < args.PrevLogIndex+1+len(args.Entries) || rf.log[args.PrevLogIndex+len(args.Entries)].Index != args.Entries[len(args.Entries)-1].Index || rf.log[args.PrevLogIndex+len(args.Entries)].Term != args.Entries[len(args.Entries)-1].Term) {
-			if len(rf.log) > args.PrevLogIndex+1 {
-				rf.log = rf.log[:args.PrevLogIndex+1] //删除该服务器prevLogIndex之后的所有日志条目
+		//misMatch := false
+		//for i, entry := range args.Entries {
+		//	if args.PrevLogIndex+1+i > rf.log[len(rf.log)-1].Index || rf.log[args.PrevLogIndex+1+i].Term != entry.Term || rf.log[args.PrevLogIndex+1+i].Index != entry.Index {
+		//		misMatch = true
+		//		break
+		//	}
+		//}
+		//if len(args.Entries) > 0 && (len(rf.log) < args.PrevLogIndex+1+len(args.Entries) || misMatch) { // rf.log[args.PrevLogIndex+len(args.Entries)].Index != args.Entries[len(args.Entries)-1].Index || rf.log[args.PrevLogIndex+len(args.Entries)].Term != args.Entries[len(args.Entries)-1].Term
+		//	if len(rf.log) > args.PrevLogIndex+1 {
+		//		rf.log = rf.log[:args.PrevLogIndex+1] //删除该服务器prevLogIndex之后的所有日志条目
+		//	}
+		//	rf.log = append(rf.log, args.Entries[0:]...)
+		//}
+		//找到不匹配的日志条目的索引
+		misMatchIndex := -1
+		for i, entry := range args.Entries {
+			if args.PrevLogIndex+1+i > rf.log[len(rf.log)-1].Index || rf.log[args.PrevLogIndex+1+i].Term != entry.Term || rf.log[args.PrevLogIndex+1+i].Index != entry.Index {
+				misMatchIndex = args.PrevLogIndex + 1 + i
+				break
 			}
-			rf.log = append(rf.log, args.Entries[0:]...)
 		}
+		//如果存在不匹配的日志条目，则覆盖其以及其之后的日志条目
+		if misMatchIndex != -1 {
+			logCopy := rf.log[:misMatchIndex]
+			logCopy = append(logCopy, args.Entries[misMatchIndex-args.PrevLogIndex-1:]...)
+			rf.log = logCopy
+			//rf.log = rf.log[0:misMatchIndex]
+			//rf.log = append(rf.log, args.Entries[misMatchIndex-args.PrevLogIndex-1:]...)
+			//DPrintf("Server %d AppendEntries (term:%d, Entries len:%d, PrevLogIndex:%d) from Leader %d.\n", rf.me, args.Term, len(args.Entries), args.PrevLogIndex, args.LeaderId)
+		}
+
 		//Figure2 AppendEntries RPC : Receiver implementation 5
 		//如果当前服务器的commitIndex小于收到RPC中的leaderCommit，则 set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
@@ -535,9 +581,9 @@ func (rf *Raft) LeaderAppendEntries() {
 			nextIdx := rf.nextIndex[idx] //待发送日志条目的Index
 			//Figure 2 : Rules for Servers : Leaders
 			if rf.log[len(rf.log)-1].Index >= nextIdx {
-				//appendLogs = make([]LogEntry, rf.log[len(rf.log)-1].Index-nextIdx+1) //为appendLogs分配足够的空间
-				//copy(appendLogs, rf.log[nextIdx:])                                   //把leader的log中nextIdx及之后的日志条目拷贝到appendLogs，准备发送
-				appendLogs = append(appendLogs, rf.log[nextIdx:]...) //把leader的log中nextIdx及之后的日志条目拷贝到appendLogs，准备发送
+				appendLogs = make([]LogEntry, rf.log[len(rf.log)-1].Index-nextIdx+1) //为appendLogs分配足够的空间
+				copy(appendLogs, rf.log[nextIdx:])                                   //把leader的log中nextIdx及之后的日志条目拷贝到appendLogs，准备发送
+				//appendLogs = append(appendLogs, rf.log[nextIdx:]...) //把leader的log中nextIdx及之后的日志条目拷贝到appendLogs，准备发送
 			}
 			prevLog := rf.log[nextIdx-1] // preLog是leader要发给server idx的日志条目的前一个日志条目
 			args := AppendEntriesArgs{
@@ -608,7 +654,8 @@ func (rf *Raft) LeaderAppendEntries() {
 					rf.matchIndex[idx] = possibleMatchIdx
 				}
 				rf.nextIndex[idx] = rf.matchIndex[idx] + 1
-				sortMatchIndex := rf.matchIndex[0:]
+				sortMatchIndex := make([]int, len(rf.peers))
+				copy(sortMatchIndex, rf.matchIndex)
 				sort.Ints(sortMatchIndex)
 				maxN := sortMatchIndex[(len(sortMatchIndex)-1)/2] //找到所有已复制到大多数节点的日志条目的最大索引
 				for N := maxN; N > rf.commitIndex; N-- {
@@ -666,6 +713,35 @@ func (rf *Raft) resetTimeoutForLeader() {
 	rf.timeout = time.Now().Add(time.Millisecond * time.Duration(100)) //Leader的超时时间设为100ms，如超时，则发送心跳RPC
 }
 
+// Lab2B	把每个Raft上已提交但为应用的日志，应用到上层状态机上(可以是kv服务器)，这里只是传入applyCh
+func (rf *Raft) applier() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		var applyMsg ApplyMsg
+		needApply := false
+		//如果有已提交但未应用的日志
+		if rf.lastApplied < rf.commitIndex {
+			rf.lastApplied++
+			applyMsg = ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log[rf.lastApplied].Command,
+				CommandIndex: rf.lastApplied, //rf.log[rf.lastApplied].Index
+			}
+			needApply = true
+		}
+		rf.mu.Unlock()
+		//虽然此处已经释放了锁，但仍可保证Command按照rf.log中的顺序被应用到上层状态机
+		//因为每个raft只有这一个applier goroutine会向本Raft的rf.applyCh中写入数据
+		//因此即使释放锁之后立马发生goroutine的调度，也不会有其他的Command被乱序的写入本Raft的rf.applyCh中
+		//只有等该applier goroutine再次获取到CPU使用权时，继续按序把调度前为来得及写入本Raft的rf.applyCh中的Command写入该Channel中
+		if needApply {
+			rf.applyCh <- applyMsg
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -695,6 +771,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []LogEntry{{Term: -1, Index: 0}}
 	rf.hbInterval = HeartbeatMs * time.Millisecond
 	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.applyCh = applyCh
 	rf.resetTimeout() //重置超时时间
 
 	// initialize from state persisted before a crash
@@ -702,5 +780,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	DPrintf("Server %v (Re)Start\n", rf.me)
+	//另起一个goroutine把已提交但未应用的logEntry应用到上层状态机
+	go rf.applier()
 	return rf
 }

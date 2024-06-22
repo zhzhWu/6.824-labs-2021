@@ -5,7 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="0693edce-429d-4de7-a800-e1d150261911" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/raft/log.txt" beforeDir="false" afterPath="$PROJECT_DIR$/src/raft/log.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/raft/raft.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/raft/raft.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/raft/test_test.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/raft/test_test.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/raft/util.go" beforeDir="false" afterPath="$PROJECT_DIR$/src/raft/util.go" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -24,25 +28,49 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.go.formatter.settings.were.checked&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.go.migrated.go.modules.settings&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.go.modules.automatic.dependencies.download&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.go.modules.go.list.on.any.changes.was.set&quot;: &quot;true&quot;,
-    &quot;WebServerToolWindowFactoryState&quot;: &quot;false&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;Lab2A&quot;,
-    &quot;go.import.settings.migrated&quot;: &quot;true&quot;,
-    &quot;go.sdk.automatically.set&quot;: &quot;true&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/home/robot/GolandProjects/awesomeProject&quot;,
-    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
-    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;com.goide.configuration.GoProjectSettingsConfigurable&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.go.formatter.settings.were.checked": "true",
+    "RunOnceActivity.go.migrated.go.modules.settings": "true",
+    "RunOnceActivity.go.modules.automatic.dependencies.download": "true",
+    "RunOnceActivity.go.modules.go.list.on.any.changes.was.set": "true",
+    "WebServerToolWindowFactoryState": "false",
+    "git-widget-placeholder": "Lab2B",
+    "go.import.settings.migrated": "true",
+    "go.sdk.automatically.set": "true",
+    "last_opened_file_path": "/home/robot/GolandProjects/awesomeProject",
+    "node.js.detected.package.eslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "settings.editor.selected.configurable": "com.goide.configuration.GoProjectSettingsConfigurable"
   }
-}</component>
-  <component name="RunManager" selected="Go Test.TestInitialElection2A in 6.824/raft">
+}]]></component>
+  <component name="RunManager" selected="Go Test.TestFailNoAgree2B in 6.824/raft">
+    <configuration name="TestFailAgree2B in 6.824/raft" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="6.824" />
+      <working_directory value="$PROJECT_DIR$/src/raft" />
+      <root_directory value="$PROJECT_DIR$/src" />
+      <kind value="PACKAGE" />
+      <package value="6.824/raft" />
+      <directory value="$PROJECT_DIR$" />
+      <filePath value="$PROJECT_DIR$" />
+      <framework value="gotest" />
+      <pattern value="^\QTestFailAgree2B\E$" />
+      <method v="2" />
+    </configuration>
+    <configuration name="TestFailNoAgree2B in 6.824/raft" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
+      <module name="6.824" />
+      <working_directory value="$PROJECT_DIR$/src/raft" />
+      <root_directory value="$PROJECT_DIR$/src" />
+      <kind value="PACKAGE" />
+      <package value="6.824/raft" />
+      <directory value="$PROJECT_DIR$" />
+      <filePath value="$PROJECT_DIR$" />
+      <framework value="gotest" />
+      <pattern value="^\QTestFailNoAgree2B\E$" />
+      <method v="2" />
+    </configuration>
     <configuration name="TestInitialElection2A in 6.824/raft" type="GoTestRunConfiguration" factoryName="Go Test" temporary="true" nameIsGenerated="true">
       <module name="6.824" />
       <working_directory value="$PROJECT_DIR$/src/raft" />
@@ -69,6 +97,8 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Go Test.TestFailNoAgree2B in 6.824/raft" />
+        <item itemvalue="Go Test.TestFailAgree2B in 6.824/raft" />
         <item itemvalue="Go Test.TestInitialElection2A in 6.824/raft" />
         <item itemvalue="Go Test.TestReElection2A in 6.824/raft" />
       </list>

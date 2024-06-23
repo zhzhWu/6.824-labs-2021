@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	"sort"
 
@@ -121,6 +123,7 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+// 每次需持久化的数据被修改后都需立即调用rf.persist()进行持久化
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
@@ -133,8 +136,17 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
+// 服务器（重新）启动时，需加载之前持久化的数据
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -153,6 +165,21 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		DPrintf("Raft server %d readPersist ERROR!\n", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -211,6 +238,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.leaderId = -1
 		rf.currentState = Follower
 		rf.currentTerm = args.Term
+		rf.persist()
 	}
 
 	// Figure2 RequestVote RPC : Receiver implementation 2
@@ -226,6 +254,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.leaderId = -1
 		reply.VoteGranted = true
+		rf.persist()
 		rf.resetTimeout()
 	} else {
 		reply.VoteGranted = false
@@ -300,6 +329,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   index,
 	}
 	rf.log = append(rf.log, newLogEntry) //leader首先把新日志追加到自己的log中去
+	rf.persist()
 	rf.mu.Unlock()
 	go rf.LeaderAppendEntries() //然后把其追加到其他服务器上
 	return index, term, true
@@ -331,6 +361,7 @@ func (rf *Raft) Convert2Candidate() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.leaderId = -1 //当前服务器发起选举，则对当前服务器来说，当前任期内的leaderId待定
+	rf.persist()
 }
 
 func (rf *Raft) Convert2Leader() {
@@ -402,6 +433,7 @@ func (rf *Raft) RunForElection() {
 				rf.currentState = Follower
 				rf.currentTerm = reply.Term
 				rf.resetTimeout() //由Candidate变回Follower，重置选举超时时间
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			}
@@ -541,6 +573,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//DPrintf("Server %d AppendEntries (term:%d, Entries len:%d, PrevLogIndex:%d) from Leader %d.\n", rf.me, args.Term, len(args.Entries), args.PrevLogIndex, args.LeaderId)
 		}
 
+		rf.persist()
+
 		//Figure2 AppendEntries RPC : Receiver implementation 5
 		//如果当前服务器的commitIndex小于收到RPC中的leaderCommit，则 set commitIndex = min(leaderCommit, index of last new entry)
 		if args.LeaderCommit > rf.commitIndex {
@@ -617,6 +651,7 @@ func (rf *Raft) LeaderAppendEntries() {
 				rf.leaderId = -1
 				rf.currentState = Follower
 				rf.currentTerm = reply.Term
+				rf.persist()
 				rf.resetTimeout() //由Leader变成Follower，重置选举超时时间
 				return
 			}
@@ -777,6 +812,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	rf.persist()
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	DPrintf("Server %v (Re)Start\n", rf.me)

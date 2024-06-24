@@ -103,6 +103,13 @@ type Raft struct {
 	matchIndex []int //leader记录和每个server已匹配的最后一条日志的index，每次当选都初始化为0
 
 	applyCh chan ApplyMsg //通过此channel模拟把已提交的日志提交到状态机
+
+	lastIncludedIndex int //快照中所包含的最后一个logEntry的Index
+	lastIncludedTerm  int //快照中所包含的最后一个logEntry的Term
+
+	//主动快照和被动快照冲突，不可同时进行，避免主、被动快照重叠应用导致上层状态机状态与下层raft日志不一致
+	activeSnapshotting  bool //标记当前server是否正在进行主动快照
+	passiveSnapshotting bool //标记当前server是否正在进行主动快照
 }
 
 // return currentTerm and whether this server
@@ -142,6 +149,8 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -171,14 +180,20 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
 		DPrintf("Raft server %d readPersist ERROR!\n", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
 	}
 }
 
@@ -187,7 +202,11 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex < rf.lastIncludedIndex || lastIncludedIndex < rf.lastApplied {
+		return false
+	}
 	return true
 }
 
@@ -197,7 +216,185 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	//如果主动快照的index不大于lastIncludedIndex，则表明此次快照是重复或更旧的，则直接返回
+	if index <= rf.lastIncludedIndex {
+		DPrintf("Server %d refuse this positive snapshot.\n", rf.me)
+		rf.mu.Unlock()
+		return
+	}
+	DPrintf("Server %d start to positively snapshot(rf.lastIncluded=%v, snapshotIndex=%v).\n", rf.me, rf.lastIncludedIndex, index)
+	//丢弃Index及其之前的LogEntries
+	//第一条(索引为0)的logEntry仍为占位日志(无效日志)，其中存储着最近一次快照包含的最后一个logEntry的term和index
+	var newlog = []LogEntry{{Term: rf.log[index-rf.lastIncludedIndex].Term, Index: index}}
+	newlog = append(newlog, rf.log[index-rf.lastIncludedIndex+1:]...)
+	rf.log = newlog
+	rf.lastIncludedIndex = newlog[0].Index
+	rf.lastIncludedTerm = newlog[0].Term
+	//更新commitIndex和lastApplied
+	if rf.commitIndex < index {
+		rf.commitIndex = index
+	}
+	if rf.lastApplied < index {
+		rf.lastApplied = index
+	}
+	//持久化
+	rf.persist()
+	state := rf.persister.ReadRaftState()
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
 
+	isLeader := (rf.currentState == Leader)
+	rf.mu.Unlock()
+	//每次leader主动快照后都把本次SnapShot信息发送给其他Follower
+	if isLeader {
+		for i, _ := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			go rf.LeaderSendSnapshot(i, snapshot)
+		}
+	}
+}
+
+// leader发送SnapShot信息给落后的Follower
+// idx是要发送给的follower的序号
+func (rf *Raft) LeaderSendSnapshot(idx int, snapshot []byte) {
+	rf.mu.Lock()
+	cterm := rf.currentTerm
+
+	//如果leader被kill或状态发生了变化，则直接返回
+	if rf.killed() || rf.currentState != Leader {
+		rf.mu.Unlock()
+		return
+	}
+	//构造InstallSnapshot RPC请求参数
+	args := InstallSnapshotArgs{
+		Term:              cterm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+		SnapshotData:      snapshot,
+	}
+	rf.mu.Unlock()
+	reply := InstallSnapshotReply{}
+	DPrintf("Leader %d sends InstallSnapshot RPC(term:%d, LastIncludedIndex:%d, LastIncludedTerm:%d) to server %d...\n",
+		rf.me, cterm, args.LastIncludedIndex, args.LastIncludedTerm, idx)
+	//向follower发送InstallSnapshot RPC，让其安装新的快照
+	ok := rf.peers[idx].Call("Raft.InstallSnapshot", args, reply)
+	if !ok {
+		DPrintf("Leader %d calls server %d for InstallSnapshot failed!\n", rf.me, idx)
+		// 如果由于网络原因或者follower故障等收不到RPC回复
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	//如果leader状态发生变化，或收到旧任期内的RPC回复，则直接返回
+	if rf.currentState != Leader || rf.currentTerm != args.Term {
+		return
+	}
+	//如果leader发现自己任期落后，则更新任期并转为follower
+	if rf.currentTerm < reply.Term {
+		rf.votedFor = -1
+		rf.currentState = Follower
+		rf.currentTerm = reply.Term
+		rf.persist()
+		return
+	}
+	//如果follower接受了leader的快照，则更新follower的matchIndex等
+	if reply.Accept && rf.matchIndex[idx] < args.LastIncludedIndex {
+		rf.matchIndex[idx] = args.LastIncludedIndex
+		rf.nextIndex[idx] = rf.matchIndex[idx] + 1
+	}
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 接受leader的被动快照前先检查给server是否正在进行主动快照，若是则本次被动快照取消
+	// 避免主、被动快照重叠应用导致上层kvserver状态与下层raft日志不一致
+	if args.Term < rf.currentTerm || rf.activeSnapshotting {
+		reply.Term = rf.currentTerm
+		reply.Accept = false
+		return
+	}
+
+	//如果follower所处任期落后，则更新所处任期
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
+		rf.currentTerm = args.Term
+		rf.persist()
+	}
+	rf.currentState = Follower
+	rf.leaderId = args.LeaderId
+	rf.resetTimeout()
+
+	snapshotIndex := args.LastIncludedIndex
+	snapshotTerm := args.LastIncludedTerm
+	reply.Term = rf.currentTerm
+	//如果该server截至args.LastIncludedIndex的logEntries已做过snapshot则返回
+	if snapshotIndex <= rf.lastIncludedIndex {
+		DPrintf("Server %d refuse the snapshot from leader.\n", rf.me)
+		reply.Accept = false
+		return
+	}
+	//执行到此说明leader传来的快照比该server的快照要新，则更新本地快照
+	var newLog []LogEntry
+	rf.lastApplied = args.LastIncludedIndex
+	//如果该server有比leader传来的快照更新的日志，则做完快照后，快照之后的日志仍应正常保留
+	if snapshotIndex < rf.log[len(rf.log)-1].Index {
+		//如果本地日志和leader传来的快照有冲突，则清空本地日志
+		if rf.log[snapshotIndex-rf.lastIncludedIndex].Term != snapshotTerm ||
+			rf.log[snapshotIndex-rf.lastIncludedIndex].Index != snapshotIndex {
+			newLog = []LogEntry{{Term: snapshotTerm, Index: snapshotIndex}}
+			rf.commitIndex = args.LastIncludedIndex
+		} else {
+			newLog = []LogEntry{{Term: snapshotTerm, Index: snapshotIndex}}
+			newLog = append(newLog, rf.log[snapshotIndex-rf.lastIncludedIndex+1:]...)
+			if args.LastIncludedTerm > rf.commitIndex {
+				rf.commitIndex = args.LastIncludedTerm
+			}
+		}
+	} else {
+		newLog = []LogEntry{{Term: snapshotTerm, Index: snapshotIndex}}
+		rf.commitIndex = args.LastIncludedIndex
+	}
+
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.log = newLog
+
+	rf.persist()                                                                       //持久化日志及一些状态
+	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), args.SnapshotData) //持久化快照
+
+	//通知上层状态机安装快照
+	snapshotMsg := ApplyMsg{
+		SnapshotValid: true,
+		CommandValid:  false,
+		SnapshotIndex: snapshotIndex,
+		SnapshotTerm:  snapshotTerm,
+		Snapshot:      args.SnapshotData,
+	}
+	rf.applyCh <- snapshotMsg
+
+	DPrintf("Server %d accept the snapshot from leader(lastIncludedIndex=%v, lastIncludedTerm=%v).\n", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
+	reply.Accept = true
+	return
+}
+
+// leader向follower发送快照的InstallSnapshot RPC请求结构
+type InstallSnapshotArgs struct {
+	Term              int    //leader的任期
+	LeaderId          int    //LeaderID
+	LastIncludedIndex int    //本次所发快照中包含的最后一个logEntry的Index
+	LastIncludedTerm  int    //本次所发快照中包含的最后一个logEntry的Term
+	SnapshotData      []byte //快照数据
+}
+
+// leader向follower发送快照的InstallSnapshot RPC返回结构
+type InstallSnapshotReply struct {
+	Term   int  //follower所属任期
+	Accept bool //follower是否接收这个快照
 }
 
 // example RequestVote RPC arguments structure.

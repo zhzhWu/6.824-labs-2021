@@ -102,7 +102,7 @@ type Raft struct {
 	nextIndex  []int //leader记录待发送给每个server的下一日志条目的index,每次当选都重新初始化为leader最后一条日志的index + 1
 	matchIndex []int //leader记录和每个server已匹配的最后一条日志的index，每次当选都初始化为0
 
-	applyCh chan ApplyMsg //通过此channel模拟把已提交的日志提交到状态机
+	applyCh chan ApplyMsg //通过此channel模拟把已提交的日志应用到状态机
 
 	lastIncludedIndex int //快照中所包含的最后一个logEntry的Index
 	lastIncludedTerm  int //快照中所包含的最后一个logEntry的Term
@@ -128,6 +128,34 @@ func (rf *Raft) GetState() (int, bool) {
 		isleader = false
 	}
 	return term, isleader
+}
+
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+// 由kvserver调用，获取rf.passiveSnapshotting标志，若其为false，则设置activeSnapshotting为true
+func (rf *Raft) GetPassiveFlagAndSetActiveFlag() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !rf.passiveSnapshotting {
+		rf.activeSnapshotting = true
+	}
+	return rf.passiveSnapshotting
+}
+
+// 由kvserver调用修改rf.activeSnapshotting
+func (rf *Raft) SetActiveSnapshottingFlag(flag bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.activeSnapshotting = flag
+}
+
+// 由kvserver调用修改rf.activeSnapshotting
+func (rf *Raft) SetPassiveSnapshottingFlag(flag bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.passiveSnapshotting = flag
 }
 
 // 每次需持久化的数据被修改后都需立即调用rf.persist()进行持久化
@@ -248,6 +276,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.log = newLog
+	rf.passiveSnapshotting = true
 	rf.persist()
 	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
 	return true
@@ -264,7 +293,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	//如果主动快照的index不大于lastIncludedIndex，则表明此次快照是重复或更旧的，则直接返回
 	if index <= rf.lastIncludedIndex {
 		DPrintf("Server %d refuse this positive snapshot.\n", rf.me)
-		rf.mu.Unlock()
+		//rf.mu.Unlock()
 		return
 	}
 	DPrintf("Server %d start to positively snapshot(rf.lastIncluded=%v, snapshotIndex=%v).\n", rf.me, rf.lastIncludedIndex, index)
@@ -275,13 +304,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.log = newlog
 	rf.lastIncludedIndex = newlog[0].Index
 	rf.lastIncludedTerm = newlog[0].Term
-	//更新commitIndex和lastApplied
-	if rf.commitIndex < index {
-		rf.commitIndex = index
-	}
-	if rf.lastApplied < index {
-		rf.lastApplied = index
-	}
+	////更新commitIndex和lastApplied
+	//if rf.commitIndex < index {
+	//	rf.commitIndex = index
+	//}
+	//if rf.lastApplied < index {
+	//	rf.lastApplied = index
+	//}
 	//持久化
 	rf.persist()
 	state := rf.persister.ReadRaftState()
@@ -334,20 +363,23 @@ func (rf *Raft) LeaderSendSnapshot(idx int, snapshot []byte) {
 		return
 	}
 	//如果follower接受了leader的快照，则更新follower的matchIndex等
-	if reply.Accept && rf.matchIndex[idx] < args.LastIncludedIndex {
-		rf.matchIndex[idx] = args.LastIncludedIndex
+	if reply.Accept {
+		if rf.matchIndex[idx] < args.LastIncludedIndex {
+			rf.matchIndex[idx] = args.LastIncludedIndex
+		}
 		rf.nextIndex[idx] = rf.matchIndex[idx] + 1
 	}
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//defer rf.mu.Unlock()
 	// 接受leader的被动快照前先检查给server是否正在进行主动快照，若是则本次被动快照取消
 	// 避免主、被动快照重叠应用导致上层kvserver状态与下层raft日志不一致
 	if args.Term < rf.currentTerm || rf.activeSnapshotting {
 		reply.Term = rf.currentTerm
 		reply.Accept = false
+		rf.mu.Unlock()
 		return
 	}
 
@@ -360,6 +392,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.currentState = Follower
 	rf.leaderId = args.LeaderId
 	rf.resetTimeout()
+	rf.mu.Unlock()
+
+	reply.Accept = rf.CondInstallSnapshot(args.LastIncludedTerm, args.LastIncludedIndex, args.SnapshotData)
 
 	//通知上层状态机安装快照
 	snapshotMsg := ApplyMsg{
@@ -373,7 +408,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	//DPrintf("Server %d accept the snapshot from leader(lastIncludedIndex=%v, lastIncludedTerm=%v).\n", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 	reply.Term = rf.currentTerm
-	reply.Accept = true
+	//reply.Accept = true
 	return
 }
 
@@ -923,15 +958,21 @@ func (rf *Raft) ticker() {
 		if time.Now().After(tout) {
 			switch cs {
 			case Follower:
+				rf.mu.Lock()
 				rf.resetTimeout() //重置超时时间
+				rf.mu.Unlock()
 				DPrintf("Follower Server %v RunForElection\n", rf.me)
 				go rf.RunForElection() //发起选举
 			case Candidate:
+				rf.mu.Lock()
 				rf.resetTimeout() //重置超时时间
+				rf.mu.Unlock()
 				DPrintf("Candidate Server %v RunForElection\n", rf.me)
 				go rf.RunForElection() //重新发起选举
 			case Leader:
+				rf.mu.Lock()
 				rf.resetTimeoutForLeader()
+				rf.mu.Unlock()
 				DPrintf("Leader Server %v AppendEntries\n", rf.me)
 				go rf.LeaderAppendEntries()
 			}
@@ -949,7 +990,7 @@ func (rf *Raft) resetTimeoutForLeader() {
 	rf.timeout = time.Now().Add(time.Millisecond * time.Duration(100)) //Leader的超时时间设为100ms，如超时，则发送心跳RPC
 }
 
-// Lab2B	把每个Raft上已提交但为应用的日志，应用到上层状态机上(可以是kv服务器)，这里只是传入applyCh
+// Lab2B	把每个Raft上已提交但未应用的日志，应用到上层状态机上(可以是kv服务器)，这里只是传入applyCh
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()

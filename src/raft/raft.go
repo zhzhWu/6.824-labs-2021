@@ -45,6 +45,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int // 指令执行时的term，便于kvserver的handler比较
 
 	// For 2D:
 	SnapshotValid bool
@@ -250,7 +251,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if lastIncludedIndex <= rf.lastIncludedIndex || lastIncludedIndex <= rf.lastApplied || lastIncludedIndex <= rf.commitIndex {
+	if lastIncludedIndex < rf.lastIncludedIndex { // || lastIncludedIndex <= rf.lastApplied || lastIncludedIndex <= rf.commitIndex
 		return false
 	}
 	var newLog []LogEntry
@@ -258,8 +259,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	//如果该server上有比leader传来的快照更新的日志，则做完快照后，快照之前的日志仍应正常保留
 	if lastIncludedIndex < rf.log[len(rf.log)-1].Index {
 		//如果本地日志和leader传来的快照有冲突，则清空本地日志
-		if rf.log[lastIncludedIndex-rf.lastIncludedIndex].Term != lastIncludedTerm ||
-			rf.log[lastIncludedIndex-rf.lastIncludedIndex].Index != lastIncludedIndex {
+		if rf.log[lastIncludedIndex-rf.lastIncludedIndex].Term != lastIncludedTerm { // || rf.log[lastIncludedIndex-rf.lastIncludedIndex].Index != lastIncludedIndex
 			newLog = []LogEntry{{Term: lastIncludedTerm, Index: lastIncludedIndex}}
 			rf.commitIndex = lastIncludedIndex
 		} else {
@@ -293,7 +293,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	//如果主动快照的index不大于lastIncludedIndex，则表明此次快照是重复或更旧的，则直接返回
 	if index <= rf.lastIncludedIndex {
 		DPrintf("Server %d refuse this positive snapshot.\n", rf.me)
-		//rf.mu.Unlock()
 		return
 	}
 	DPrintf("Server %d start to positively snapshot(rf.lastIncluded=%v, snapshotIndex=%v).\n", rf.me, rf.lastIncludedIndex, index)
@@ -304,13 +303,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.log = newlog
 	rf.lastIncludedIndex = newlog[0].Index
 	rf.lastIncludedTerm = newlog[0].Term
-	////更新commitIndex和lastApplied
-	//if rf.commitIndex < index {
-	//	rf.commitIndex = index
-	//}
-	//if rf.lastApplied < index {
-	//	rf.lastApplied = index
-	//}
 	//持久化
 	rf.persist()
 	state := rf.persister.ReadRaftState()
@@ -373,13 +365,12 @@ func (rf *Raft) LeaderSendSnapshot(idx int, snapshot []byte) {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	defer rf.mu.Unlock()
 	// 接受leader的被动快照前先检查给server是否正在进行主动快照，若是则本次被动快照取消
 	// 避免主、被动快照重叠应用导致上层kvserver状态与下层raft日志不一致
 	if args.Term < rf.currentTerm || rf.activeSnapshotting {
 		reply.Term = rf.currentTerm
 		reply.Accept = false
-		rf.mu.Unlock()
 		return
 	}
 
@@ -392,9 +383,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.currentState = Follower
 	rf.leaderId = args.LeaderId
 	rf.resetTimeout()
-	rf.mu.Unlock()
-
-	reply.Accept = rf.CondInstallSnapshot(args.LastIncludedTerm, args.LastIncludedIndex, args.SnapshotData)
 
 	//通知上层状态机安装快照
 	snapshotMsg := ApplyMsg{
@@ -408,7 +396,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	//DPrintf("Server %d accept the snapshot from leader(lastIncludedIndex=%v, lastIncludedTerm=%v).\n", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 	reply.Term = rf.currentTerm
-	//reply.Accept = true
+	reply.Accept = true
 	return
 }
 
@@ -908,7 +896,8 @@ func (rf *Raft) LeaderAppendEntries() {
 						}
 					}
 					if foundConflictTerm {
-						possibleNextIdx = rf.log[k+1].Index // 如果找到了对应的Term，则下次发送该Term内的最后一个日志条目
+						possibleNextIdx = rf.log[k].Index
+						//possibleNextIdx = rf.log[k+1].Index // 如果找到了对应的Term，则下次发送该Term内的最后一个日志条目
 					} else {
 						possibleNextIdx = reply.ConflictIndex
 					}
@@ -1009,6 +998,7 @@ func (rf *Raft) applier() {
 				SnapshotValid: false,
 				Command:       rf.log[rf.lastApplied-rf.lastIncludedIndex].Command,
 				CommandIndex:  rf.lastApplied, //rf.log[rf.lastApplied].Index
+				CommandTerm:   rf.log[rf.lastApplied-rf.lastIncludedIndex].Term,
 			}
 			needApply = true
 		}

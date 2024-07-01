@@ -54,10 +54,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvDB           map[string]string  //存储键值对
-	sessions       map[int64]Session  //记录为每个客户端处理的最后一条指令的信息
-	notifyMapCh    map[int]chan Reply //kvserver apply到了等待回复的日志则通过chan通知对应的handler方法回复client，key为日志的index
-	logLastApplied int                //此kvserver已应用的最后一条log的index
+	kvDB                  map[string]string  //存储键值对
+	sessions              map[int64]Session  //记录为每个客户端处理的最后一条指令的信息
+	notifyMapCh           map[int]chan Reply //kvserver apply到了等待回复的日志则通过chan通知对应的handler方法回复client，key为日志的index
+	logLastApplied        int                //此kvserver已应用的最后一条log的index
+	passiveSnapshotBefore bool               // 标志着applyMessage上一个从channel中取出的是被动快照并已安装完
 }
 
 // raft对command达成共识后通过applyCh通知kvserver应用该command，
@@ -167,6 +168,17 @@ func (kv *KVServer) applyMessage() {
 				kv.mu.Unlock()
 				continue
 			}
+
+			// 如果上一个取出的是被动快照且已安装完，则要注意排除“跨快照指令”
+			// 因为被动快照安装完后，后续的指令应该从快照结束的index之后紧接着逐个apply
+			if kv.passiveSnapshotBefore {
+				if msg.CommandIndex-kv.logLastApplied != 1 {
+					kv.mu.Unlock()
+					continue
+				}
+				kv.passiveSnapshotBefore = false
+			}
+
 			//如果是未应用过的指令，则更新logLastApplied
 			kv.logLastApplied = msg.CommandIndex
 			op, ok := msg.Command.(Op) //类型断言,把msg.Command转换为Op类型
@@ -177,7 +189,9 @@ func (kv *KVServer) applyMessage() {
 				sessionRec, exist := kv.sessions[op.ClientId]
 				//再次检查该指令是否已被应用过
 				if exist && op.CommandNum <= sessionRec.LastCommandNum {
-					reply = kv.sessions[op.ClientId].Response //如果已经应用过，则直接返回上次的结果
+					if op.CommandNum == sessionRec.LastCommandNum {
+						reply = kv.sessions[op.ClientId].Response //如果已经应用过，则直接返回上次的结果
+					}
 				} else { //如果没有应用过，则把该指令应用到上层状态机kvserver
 					switch op.OpType {
 					case "Get":
@@ -205,29 +219,32 @@ func (kv *KVServer) applyMessage() {
 						DPrintf("Unexpected OpType!\n")
 					}
 					//更新已执行的最后一条指令信息
-					kv.sessions[op.ClientId] = Session{
+					session := Session{
 						LastCommandNum: op.CommandNum,
 						OpType:         op.OpType,
 						Response:       reply,
 					}
+					kv.sessions[op.ClientId] = session
 				}
 				//检查是否有线程在commandindex channel上等待
 				if _, existCh := kv.notifyMapCh[msg.CommandIndex]; existCh {
 					//只有leader才需要向客户端返回执行结果，follower只需应用到上层状态机，无需返回
-					if _, isleader := kv.rf.GetState(); isleader {
+					if cterm, isleader := kv.rf.GetState(); isleader && msg.CommandTerm == cterm {
 						kv.notifyMapCh[msg.CommandIndex] <- reply
 					}
 				}
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
-			//安装快照，在raft曾已经实现了是否安装快照的判断
-			//只有被follower接受了的快照才会通过applyCh通知上层状态机，所以这里可以直接安装
 			kv.mu.Lock()
-			kv.applySnapshotToSM(msg.Snapshot)
-			kv.logLastApplied = msg.SnapshotIndex
+			//安装快照之前先在raft层进行判断，只有被接收了的快照才能被安装
+			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+				kv.applySnapshotToSM(msg.Snapshot)
+				kv.logLastApplied = msg.SnapshotIndex
+				kv.passiveSnapshotBefore = true         // 刚安装完被动快照，提醒下一个从channel中取出的若是指令则注意是否为“跨快照指令”
+				kv.rf.SetPassiveSnapshottingFlag(false) //已完成被动快照，所以SetPassiveSnapshottingFlag(false)
+			}
 			kv.mu.Unlock()
-			kv.rf.SetPassiveSnapshottingFlag(false) //已完成被动快照，所以SetPassiveSnapshottingFlag(false)
 		} else {
 			DPrintf("KVServer[%d] get an unexpected ApplyMsg!\n", kv.me)
 		}
@@ -259,7 +276,7 @@ func (kv *KVServer) checkSnapshotNeed() {
 			time.Sleep(time.Millisecond * 50)
 			continue
 		}
-		if kv.maxraftstate != -1 && float64(kv.rf.GetRaftStateSize())/float64(kv.maxraftstate) > 0.9 {
+		if kv.maxraftstate != -1 && float32(kv.rf.GetRaftStateSize())/float32(kv.maxraftstate) > 0.9 {
 			kv.mu.Lock()
 			snapshotIndex = kv.logLastApplied
 			w := new(bytes.Buffer)
@@ -329,6 +346,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.sessions = make(map[int64]Session)
 	kv.notifyMapCh = make(map[int]chan Reply)
 	kv.logLastApplied = 0
+	kv.passiveSnapshotBefore = false
 	// You may need initialization code here.
 	go kv.applyMessage()      //读applyCh，应用日志或快照
 	go kv.checkSnapshotNeed() //定期检查是否需要快照

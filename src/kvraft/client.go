@@ -59,24 +59,30 @@ func (ck *Clerk) Get(key string) string {
 			time.Sleep(time.Millisecond * 5)
 		}
 		reply := GetReply{} //在循环内定义，防止收到不同的i的响应
+		DPrintf("Client[%d] request [%d] for Get(key:%v)......\n", ck.clientId, i, args.Key)
 		ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 		if !ok { //如果调用失败,则重试
+			DPrintf("Client[%d] Get request failed!\n", ck.clientId)
 			ck.leaderId = -1
 			continue
 		} else {
 			switch reply.Err {
 			case OK: //找到leader并且leader存储有key:value键值对
+				DPrintf("Client[%d] request(Seq:%d) for Get(key:%v) [successfully]!\n", ck.clientId, args.CommandNum, args.Key)
 				ck.commandNum++ //该client的序列号递增
 				ck.leaderId = i //记录leaderid
 				return reply.Value
 			case ErrNoKey:
+				DPrintf("Client[%d] request(Seq:%d) for Get(key:%v) but [NoKey]!\n", ck.clientId, args.CommandNum, args.Key)
 				ck.commandNum++
 				ck.leaderId = i
 				return ""
 			case ErrWrongLeader:
+				DPrintf("Client[%d] request(Seq:%d) for Get(key:%v) but [WrongLeader]!\n", ck.clientId, args.CommandNum, args.Key)
 				ck.leaderId = -1
 				continue
 			case ErrTimeout:
+				DPrintf("Client[%d] request(Seq:%d) for Get(key:%v) but [Timeout]!\n", ck.clientId, args.CommandNum, args.Key)
 				ck.leaderId = -1
 				continue
 			}

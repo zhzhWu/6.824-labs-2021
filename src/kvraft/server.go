@@ -159,9 +159,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) applyMessage() {
+	DPrintf("KVserver[%d] (re)start applymessage.\n", kv.me)
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		if msg.CommandValid {
+			DPrintf("KVServer[%d] get a Command applyMsg(= %v) from applyCh.\n", kv.me, msg)
 			kv.mu.Lock()
 			//应用之前先判断该指令是否已被应用过
 			if msg.CommandIndex <= kv.logLastApplied {
@@ -181,6 +183,7 @@ func (kv *KVServer) applyMessage() {
 
 			//如果是未应用过的指令，则更新logLastApplied
 			kv.logLastApplied = msg.CommandIndex
+			DPrintf("KVServer[%d] update logLastApplied to %d.\n", kv.me, kv.logLastApplied)
 			op, ok := msg.Command.(Op) //类型断言,把msg.Command转换为Op类型
 			if !ok {
 				DPrintf("convert fail!\n")
@@ -191,6 +194,7 @@ func (kv *KVServer) applyMessage() {
 				if exist && op.CommandNum <= sessionRec.LastCommandNum {
 					if op.CommandNum == sessionRec.LastCommandNum {
 						reply = kv.sessions[op.ClientId].Response //如果已经应用过，则直接返回上次的结果
+						DPrintf("KVServer[%d] use the reply(=%v) in sessions for %v.\n", kv.me, reply, op.OpType)
 					}
 				} else { //如果没有应用过，则把该指令应用到上层状态机kvserver
 					switch op.OpType {
@@ -203,9 +207,11 @@ func (kv *KVServer) applyMessage() {
 							reply.Err = OK
 							reply.Value = val
 						}
+						DPrintf("KVServer[%d] apply Get(key:%v, value:%v) Op!\n", kv.me, op.Key, reply.Value)
 					case "Put":
 						kv.kvDB[op.Key] = op.Value
 						reply.Err = OK
+						DPrintf("KVServer[%d] apply Put(key:%v, value:%v) Op!\n", kv.me, op.Key, op.Value)
 					case "Append":
 						oldValue, existKey := kv.kvDB[op.Key]
 						if !existKey {
@@ -215,6 +221,7 @@ func (kv *KVServer) applyMessage() {
 							reply.Err = OK
 							kv.kvDB[op.Key] = oldValue + op.Value
 						}
+						DPrintf("KVServer[%d] apply Append(key:%v, value:%v) Op!\n", kv.me, op.Key, op.Value)
 					default:
 						DPrintf("Unexpected OpType!\n")
 					}
@@ -225,6 +232,7 @@ func (kv *KVServer) applyMessage() {
 						Response:       reply,
 					}
 					kv.sessions[op.ClientId] = session
+					DPrintf("KVServer[%d].sessions[%d] = %v\n", kv.me, op.ClientId, session)
 				}
 				//检查是否有线程在commandindex channel上等待
 				if _, existCh := kv.notifyMapCh[msg.CommandIndex]; existCh {
@@ -236,12 +244,14 @@ func (kv *KVServer) applyMessage() {
 			}
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
+			DPrintf("KVServer[%d] get a Snapshot applyMsg from applyCh.\n", kv.me)
 			kv.mu.Lock()
 			//安装快照之前先在raft层进行判断，只有被接收了的快照才能被安装
 			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
 				kv.applySnapshotToSM(msg.Snapshot)
 				kv.logLastApplied = msg.SnapshotIndex
-				kv.passiveSnapshotBefore = true         // 刚安装完被动快照，提醒下一个从channel中取出的若是指令则注意是否为“跨快照指令”
+				kv.passiveSnapshotBefore = true // 刚安装完被动快照，提醒下一个从channel中取出的若是指令则注意是否为“跨快照指令”
+				DPrintf("KVServer[%d] finish a negative Snapshot, kv.logLastApplied become %v.\n", kv.me, kv.logLastApplied)
 				kv.rf.SetPassiveSnapshottingFlag(false) //已完成被动快照，所以SetPassiveSnapshottingFlag(false)
 			}
 			kv.mu.Unlock()
@@ -273,11 +283,13 @@ func (kv *KVServer) checkSnapshotNeed() {
 		var snapshotData []byte
 		var snapshotIndex int
 		if kv.rf.GetPassiveFlagAndSetActiveFlag() { //如果正在进行被动快照，则放弃本次主动快照检查
+			DPrintf("Server %d is passive snapshotting and refuses positive snapshot.\n", kv.me)
 			time.Sleep(time.Millisecond * 50)
 			continue
 		}
 		if kv.maxraftstate != -1 && float32(kv.rf.GetRaftStateSize())/float32(kv.maxraftstate) > 0.9 {
 			kv.mu.Lock()
+			DPrintf("KVServer[%d]: The Raft state size is approaching the maxraftstate, Start to snapshot...\n", kv.me)
 			snapshotIndex = kv.logLastApplied
 			w := new(bytes.Buffer)
 			e := labgob.NewEncoder(w)
@@ -328,6 +340,7 @@ func (kv *KVServer) killed() bool {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
+	DPrintf("(Re)Start KVServer[%d]!\n", me)
 	labgob.Register(Op{})
 
 	kv := new(KVServer)

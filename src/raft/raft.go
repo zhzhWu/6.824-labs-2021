@@ -252,6 +252,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if lastIncludedIndex < rf.lastIncludedIndex { // || lastIncludedIndex <= rf.lastApplied || lastIncludedIndex <= rf.commitIndex
+		DPrintf("Server %d refuse the snapshot from leader.\n", rf.me)
 		return false
 	}
 	var newLog []LogEntry
@@ -392,7 +393,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		Snapshot:      args.SnapshotData,
 	}
-	go func(msg ApplyMsg) { rf.applyCh <- msg }(snapshotMsg)
+	go func(msg ApplyMsg) {
+		rf.applyCh <- msg
+		DPrintf("Server %d send SnapshotMsg(snapIndex=%v) to ApplyCh.\n", rf.me, msg.SnapshotIndex)
+	}(snapshotMsg)
 
 	//DPrintf("Server %d accept the snapshot from leader(lastIncludedIndex=%v, lastIncludedTerm=%v).\n", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 	reply.Term = rf.currentTerm
@@ -577,12 +581,14 @@ func (rf *Raft) Convert2Candidate() {
 	rf.votedFor = rf.me
 	rf.leaderId = -1 //当前服务器发起选举，则对当前服务器来说，当前任期内的leaderId待定
 	rf.persist()
+	DPrintf("Candidate %d run for election! Its current term is %d\n", rf.me, rf.currentTerm)
 }
 
 func (rf *Raft) Convert2Leader() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.currentState = Leader
+	DPrintf("Candidate %d was successfully elected as the leader! Its current term is %d\n", rf.me, rf.currentTerm)
 	//rf.votedFor = -1
 	rf.leaderId = rf.me
 
@@ -657,6 +663,7 @@ func (rf *Raft) RunForElection() {
 			voteFlag := reply.VoteGranted
 			voteMu.Lock()
 			if voteFlag {
+				DPrintf("Candidate %d got a vote from server %d!\n", rf.me, idx)
 				votes++ //成功获得选票
 			}
 			finished++ //每收到一个返回，finished递增

@@ -1,6 +1,10 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+	"log"
+	"os"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -545,8 +549,18 @@ func TestOnePartition3A(t *testing.T) {
 	cfg.end()
 }
 
+func SetLogOutputToFile() {
+	//把DPrintf日志打印输出到log.log文件
+	f, err := os.OpenFile("log.log", os.O_CREATE|os.O_TRUNC|os.O_RDWR, os.ModePerm) // os.O_APPEND|
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
+}
+
 func TestManyPartitionsOneClient3A(t *testing.T) {
 	// Test: partitions, one client (3A) ...
+	//SetLogOutputToFile()
 	GenericTest(t, "3A", 1, 5, false, false, true, -1, false)
 }
 
@@ -585,12 +599,10 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 	GenericTest(t, "3A", 15, 7, true, true, true, -1, true)
 }
 
-//
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
 // also checks that majority discards committed log entries
 // even if minority doesn't respond.
-//
 func TestSnapshotRPC3B(t *testing.T) {
 	const nservers = 3
 	maxraftstate := 1000
